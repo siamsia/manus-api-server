@@ -46,28 +46,34 @@ def save_file(filename):
 
 
 # ====== API: Upload ZIP file to Google Drive ======
-@app.route('/upload_zip', methods=['POST'])
+@app.route('/upload/zip', methods=['POST'])
 def upload_zip():
-    data = request.json
-    zip_file_path = data.get('filepath', '')
-    if not os.path.exists(zip_file_path):
-        return jsonify({'status': 'error', 'message': 'File not found'})
-    try:
-        file_metadata = {
-            'name': os.path.basename(zip_file_path),
-            'parents': [FOLDER_ID]
-        }
-        media = MediaFileUpload(zip_file_path, mimetype='application/zip')
-        file = drive_service.files().create(body=file_metadata,
-                                            media_body=media,
-                                            fields='id').execute()
-        return jsonify({'status': 'success', 'file_id': file.get("id")})
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)})
+    if 'file' not in request.files:
+        return 'No file part', 400
+    file = request.files['file']
+    if file.filename == '':
+        return 'No selected file', 400
+    save_path = os.path.join('uploads', file.filename)
+    os.makedirs('uploads', exist_ok=True)
+    file.save(save_path)
+    return 'File uploaded successfully', 200
 
+@app.route('/list_uploads', methods=['GET'])
+def list_uploads():
+    files = os.listdir('uploads')
+    return jsonify(files)
+
+@app.route('/download/zip/<filename>', methods=['GET'])
+def download_zip(filename):
+    file_path = os.path.join('uploads', filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, as_attachment=True)
+    else:
+        return 'File not found', 404
 
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 3000)))
+
 
 
