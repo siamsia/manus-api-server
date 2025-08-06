@@ -6,13 +6,14 @@ import os
 
 app = Flask(__name__)
 
-# ====== SETUP Google Drive API ======
 SCOPES = ['https://www.googleapis.com/auth/drive']
-SERVICE_ACCOUNT_FILE = 'service_account.json'  # <-- อัปโหลดไฟล์ JSON นี้ไปด้วย
+service_account_info = json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT'])
+creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
+
+# ====== SETUP Google Drive API ======
+#SERVICE_ACCOUNT_FILE = 'service_account.json'  # <-- อัปโหลดไฟล์ JSON นี้ไปด้วย
 FOLDER_ID = '1fecni5SG7jN97nlWpYePpRaF3XgES8f2'  # <-- ใส่ Folder ID ของ Google Drive ที่ต้องการอัปโหลดไฟล์
 
-creds = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES)
 drive_service = build('drive', 'v3', credentials=creds)
 
 
@@ -67,3 +68,4 @@ def upload_zip():
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 3000)))
+
