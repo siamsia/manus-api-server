@@ -9,22 +9,36 @@ from pydantic import BaseModel
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from google.oauth2.service_account import Credentials
+import gspread
 
 app = FastAPI()
 
 # ====== SETUP GOOGLE DRIVE API ======
-SCOPES = ['https://www.googleapis.com/auth/drive']
+SCOPES = ['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/spreadsheets']
 service_account_info = json.loads(os.environ['GOOGLE_SERVICE_ACCOUNT'])
-creds = service_account.Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
+creds = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
+gc = gspread.authorize(creds)
+
 drive_service = build('drive', 'v3', credentials=creds)
 FOLDER_ID = '1fecni5SG7jN97nlWpYePpRaF3XgES8f2'  # <-- Folder ID ของ Google Drive
 
+SHEET_ID = "1xxxxxxxxxxxxxxxxxxxxxxx"  # ใส่ Spreadsheet ID
+LOG_SHEET = "ImageLog"
+PROMPT_SHEET = "PromptTopics"
 
-# ====== MODEL สำหรับ /upload/log ======
-class LogUploadRequest(BaseModel):
+# ====== Models ======
+class ImageLog(BaseModel):
     id: str
+    filename: str
     title: str
-    content: str
+    keywords: List[str]
+    prompt: str
+
+# ====== MODEL สำหรับ prompt ======
+class MarkPromptRequest(BaseModel):
+    topic: str
+    status: str = "done"
 
 
 # ====== API: Load todo.txt / image_history.txt ======
@@ -86,41 +100,61 @@ async def download_zip(filename: str):
         raise HTTPException(status_code=404, detail="File not found")
 
 
-# ====== API: Upload log TXT to Google Drive ======
+# ====== API: Upload logs 1 row per image ======
 @app.post("/upload/log")
-async def upload_log_file(data: LogUploadRequest):
+async def upload_logs(logs: List[ImageLog]):
     try:
-        # ตั้งชื่อไฟล์ เช่น 250807_abc123_generate_seamless_pattern.txt
-        date_str = datetime.now().strftime("%y%m%d")
-        safe_title = data.title.replace(" ", "_")
-        filename = f"{date_str}_{data.id}_{safe_title}.txt"
+        sheet = client.open_by_key(SHEET_ID).worksheet(LOG_SHEET_NAME)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        rows = []
+        for log in logs:
+            keywords = (log.keywords + [''] * 5)[:5]  # เติมให้ครบ 5 คำ
+            row = [
+                log.id,
+                timestamp,
+                log.filename,
+                log.title,
+                *keywords,
+                log.prompt
+            ]
+            rows.append(row)
+        sheet.append_rows(rows)
+        return {"status": "success", "rows_uploaded": len(rows)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-        # เขียนไฟล์ชั่วคราว
-        local_path = f"/tmp/{filename}"
-        with open(local_path, "w", encoding="utf-8") as f:
-            f.write(data.content)
 
-        # อัปโหลดขึ้น Google Drive
-        file_metadata = {
-            'name': filename,
-            'parents': [FOLDER_ID]
-        }
-        media = MediaFileUpload(local_path, mimetype='text/plain')
-        uploaded_file = drive_service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id, name'
-        ).execute()
+# ====== API: Get next unused prompt ======
+@app.get("/prompt/next")
+async def get_next_prompt():
+    try:
+        sheet = client.open_by_key(SHEET_ID).worksheet(PROMPT_SHEET_NAME)
+        data = sheet.get_all_records()
+        for i, row in enumerate(data, start=2):  # เริ่มแถว 2 เพราะแถว 1 header
+            if not row.get("status"):
+                topic = row.get("topic")
+                prompts = json.loads(row.get("prompts", "[]"))
+                return {"topic": topic, "prompts": prompts, "row": i}
+        raise HTTPException(status_code=404, detail="No available prompt")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-        return {
-            "status": "success",
-            "file_id": uploaded_file.get("id"),
-            "file_name": uploaded_file.get("name")
-        }
 
+# ====== API: Mark prompt as used ======
+@app.post("/prompt/mark")
+async def mark_prompt_used(req: MarkPromptRequest):
+    try:
+        sheet = client.open_by_key(SHEET_ID).worksheet(PROMPT_SHEET_NAME)
+        data = sheet.get_all_records()
+        for i, row in enumerate(data, start=2):
+            if row.get("topic") == req.topic:
+                sheet.update_cell(i, 3, req.status)  # สมมุติ column C เป็น status
+                return {"status": "marked", "row": i}
+        raise HTTPException(status_code=404, detail="Topic not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 3000)))
+
