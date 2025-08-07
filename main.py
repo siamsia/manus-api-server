@@ -11,6 +11,8 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.service_account import Credentials
 import gspread
+import logging
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
 
@@ -121,8 +123,8 @@ async def upload_logs(logs: List[ImageLog]):
         sheet.append_rows(rows)
         return {"status": "success", "rows_uploaded": len(rows)}
     except Exception as e:
+        logging.exception("Error while uploading logs")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ====== API: Get next unused prompt ======
 @app.get("/prompt/next")
@@ -137,6 +139,7 @@ async def get_next_prompt():
                 return {"topic": topic, "prompts": prompts, "row": i}
         raise HTTPException(status_code=404, detail="No available prompt")
     except Exception as e:
+        logging.exception("Error while prompt/next")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -152,11 +155,13 @@ async def mark_prompt_used(req: MarkPromptRequest):
                 return {"status": "marked", "row": i}
         raise HTTPException(status_code=404, detail="Topic not found")
     except Exception as e:
+        logging.exception("Error while prompt/mark")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 3000)))
+
 
 
 
