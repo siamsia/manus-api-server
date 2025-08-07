@@ -126,7 +126,7 @@ async def get_next_prompt():
         values = result.get("values", [])
 
         if not values or len(values) < 2:
-            return {SHEET_NAME: []}
+            return {"prompts": []}
 
         headers = values[0]
         rows = values[1:]
@@ -137,14 +137,17 @@ async def get_next_prompt():
         if not all(col in idx_map for col in required_cols):
             raise HTTPException(status_code=500, detail="Missing required columns")
 
-        # กรองเฉพาะแถวที่ยังไม่ถูกใช้
-        unused = [row for row in rows if len(row) > idx_map["used"] and row[idx_map["used"]].strip() == ""]
+        # กรองเฉพาะแถวที่ยังไม่ถูกใช้ (ปลอดภัยต่อ row ที่มีคอลัมน์ไม่ครบ)
+        unused = []
+        for row in rows:
+            used_val = row[idx_map["used"]] if len(row) > idx_map["used"] else ""
+            if used_val.strip() == "":
+                unused.append(row)
 
         if not unused:
             return {"prompts": []}
 
         # แยกตาม topic แล้วเลือกเฉพาะ topic แรก
-        from collections import defaultdict
         grouped = defaultdict(list)
         for row in unused:
             topic = row[idx_map["topic"]]
@@ -216,6 +219,7 @@ async def mark_prompt_used(request: MarkPromptRequest):
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 3000)))
+
 
 
 
