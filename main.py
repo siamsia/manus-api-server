@@ -121,12 +121,12 @@ async def get_next_prompt():
         sheet = sheet_service.spreadsheets()
         result = sheet.values().get(
             spreadsheetId=SHEET_ID,
-            range="prompts"
+            range=SHEET_NAME
         ).execute()
         values = result.get("values", [])
 
         if not values or len(values) < 2:
-            return {"prompts": []}
+            return {SHEET_NAME: []}
 
         headers = values[0]
         rows = values[1:]
@@ -216,6 +216,7 @@ async def mark_prompt_used(request: MarkPromptRequest):
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 3000)))
+
 
 
 
