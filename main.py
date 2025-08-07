@@ -193,21 +193,24 @@ async def mark_prompt_used(request: MarkPromptRequest):
     try:
         result = sheet_service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,
-            range=f"{SHEET_NAME}!A2:L"
+            range=f"{SHEET_NAME}!A2:A"  # อ่านเฉพาะ column A (rowId)
         ).execute()
 
-        rows = result.get('values', [])
+        row_id_values = result.get('values', [])
         now_thai = datetime.now(pytz.timezone("Asia/Bangkok")).strftime('%Y-%m-%d %H:%M:%S')
 
         updates = []
-        for i, row in enumerate(rows):
+
+        for i, row in enumerate(row_id_values):
+            if not row:
+                continue
             try:
                 row_id = int(row[0])
-            except (IndexError, ValueError):
+            except ValueError:
                 continue
 
             if row_id in request.rowIds:
-                row_idx = i + 1 + 1  # บวก 1 เพราะเริ่ม A2 และอีก 1 เพราะ header
+                row_idx = i + 2  # เพราะเริ่ม A2, ต้องบวก 2 เพื่อ map ไป row จริง
                 updates.append({
                     "range": f"{SHEET_NAME}!J{row_idx}:L{row_idx}",
                     "values": [["yes", request.log_id, now_thai]]
@@ -215,21 +218,26 @@ async def mark_prompt_used(request: MarkPromptRequest):
 
         if updates:
             body = {"valueInputOption": "RAW", "data": updates}
-            sheet_service.spreadsheets().values().batchUpdate(
+            response = sheet_service.spreadsheets().values().batchUpdate(
                 spreadsheetId=SPREADSHEET_ID,
                 body=body
             ).execute()
+            logging.info("Update response: %s", response)
+        else:
+            logging.info("No rows matched for update.")
 
         return {"status": "success", "marked": len(updates)}
 
     except Exception as e:
         logging.exception("Error while mark_prompt_used")
         raise HTTPException(status_code=500, detail=str(e))
+
         
 
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 3000)))
+
 
 
 
