@@ -149,13 +149,23 @@ async def get_next_prompt():
             return {"prompts": []}
 
         # แยกตาม topic แล้วเลือกเฉพาะ topic แรก
-        grouped = defaultdict(list)
+        seen_topics = set()
+        grouped = []
         for row in unused:
             topic = row[idx_map["topic"]]
-            grouped[topic].append(row)
+            if topic not in seen_topics:
+                seen_topics.add(topic)
+                grouped.append((topic, [row]))
+            else:
+                for g in grouped:
+                    if g[0] == topic:
+                        g[1].append(row)
+                        break
 
-        first_topic = sorted(grouped.keys())[0]
-        selected_rows = grouped[first_topic]
+        if not grouped:
+            return {"prompts": []}
+
+        first_topic, selected_rows = grouped[0]
 
         # คืนค่าเฉพาะข้อมูลที่ต้องการ
         output = []
@@ -220,6 +230,7 @@ async def mark_prompt_used(request: MarkPromptRequest):
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 3000)))
+
 
 
 
