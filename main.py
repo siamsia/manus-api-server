@@ -118,34 +118,56 @@ async def upload_logs(logs: List[ImageLog]):
 @app.get("/get_next_prompt")
 async def get_next_prompt():
     try:
-        # ดึงทั้ง A (rowId), B (topic), C (prompt), J (used)
-        result = sheet_service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID,
-            range=f"{SHEET_NAME}!A2:J"
+        sheet = sheet_service.spreadsheets()
+        result = sheet.values().get(
+            spreadsheetId=SHEET_ID,
+            range="prompts"
         ).execute()
+        values = result.get("values", [])
 
-        rows = result.get('values', [])
-        available_prompts = []
+        if not values or len(values) < 2:
+            return {"prompts": []}
 
-        for row in rows:
-            if len(row) >= 3:
-                row_id = int(row[0])
-                topic = row[1]
-                prompt = row[2]
-                used = row[9] if len(row) >= 10 else ""  # J = index 9
+        headers = values[0]
+        rows = values[1:]
 
-                if used.lower() != "yes":
-                    available_prompts.append({
-                        "rowId": row_id,
-                        "topic": topic,
-                        "prompt": prompt
-                    })
+        # หาตำแหน่งของแต่ละ column
+        idx_map = {h: i for i, h in enumerate(headers)}
+        required_cols = ["rowId", "topic", "prompt", "used"]
+        if not all(col in idx_map for col in required_cols):
+            raise HTTPException(status_code=500, detail="Missing required columns")
 
-        return {"status": "success", "prompts": available_prompts}
+        # กรองเฉพาะแถวที่ยังไม่ถูกใช้
+        unused = [row for row in rows if len(row) > idx_map["used"] and row[idx_map["used"]].strip() == ""]
+
+        if not unused:
+            return {"prompts": []}
+
+        # แยกตาม topic แล้วเลือกเฉพาะ topic แรก
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for row in unused:
+            topic = row[idx_map["topic"]]
+            grouped[topic].append(row)
+
+        first_topic = sorted(grouped.keys())[0]
+        selected_rows = grouped[first_topic]
+
+        # คืนค่าเฉพาะข้อมูลที่ต้องการ
+        output = []
+        for row in selected_rows:
+            output.append({
+                "rowId": int(row[idx_map["rowId"]]),
+                "topic": row[idx_map["topic"]],
+                "prompt": row[idx_map["prompt"]],
+            })
+
+        return {"prompts": output}
 
     except Exception as e:
         logging.exception("Error while get_next_prompt")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # ====== /mark_prompt_used ======
 class MarkPromptRequest(BaseModel):
@@ -194,6 +216,7 @@ async def mark_prompt_used(request: MarkPromptRequest):
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 3000)))
+
 
 
 
