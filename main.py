@@ -26,8 +26,13 @@ drive_service = build('drive', 'v3', credentials=creds)
 FOLDER_ID = '1fecni5SG7jN97nlWpYePpRaF3XgES8f2'  # <-- Folder ID ของ Google Drive
 
 SHEET_ID = "1bwjLe1Q92SP4OFqrfsqrOnn9eAtTKKCXFIpwVT2oB50"  # ใส่ Spreadsheet ID
-LOG_SHEET_NAME = "logs"
+
 PROMPT_SHEET_NAME = "prompts"
+LOG_SHEET_NAME = "logs"
+
+sh = gc.open_by_key(SHEET_ID)
+promptsheet = sh.worksheet(PROMPT_SHEET_NAME)
+logsheet = sh.worksheet(LOG_SHEET_NAME)
 
 # ====== Models ======
 class ImageLog(BaseModel):
@@ -37,10 +42,9 @@ class ImageLog(BaseModel):
     keywords: List[str]
     prompt: str
 
-# ====== MODEL สำหรับ prompt ======
+# === Schema ===
 class MarkPromptRequest(BaseModel):
-    topic: str
-    status: str = "done"
+    topicId: int
 
 
 # ====== API: Load todo.txt / image_history.txt ======
@@ -106,7 +110,6 @@ async def download_zip(filename: str):
 @app.post("/upload/log")
 async def upload_logs(logs: List[ImageLog]):
     try:
-        sheet = client.open_by_key(SHEET_ID).worksheet(LOG_SHEET_NAME)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         rows = []
         for log in logs:
@@ -120,47 +123,47 @@ async def upload_logs(logs: List[ImageLog]):
                 log.prompt
             ]
             rows.append(row)
-        sheet.append_rows(rows)
+        logsheet.append_rows(rows)
         return {"status": "success", "rows_uploaded": len(rows)}
     except Exception as e:
         logging.exception("Error while uploading logs")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ====== API: Get next unused prompt ======
-@app.get("/prompt/next")
+# === API: ดึง topic ถัดไปที่ยังไม่ mark ===
+@app.get("/get_next_prompt")
 async def get_next_prompt():
     try:
-        sheet = client.open_by_key(SHEET_ID).worksheet(PROMPT_SHEET_NAME)
-        data = sheet.get_all_records()
-        for i, row in enumerate(data, start=2):  # เริ่มแถว 2 เพราะแถว 1 header
-            if not row.get("status"):
-                topic = row.get("topic")
-                prompts = json.loads(row.get("prompts", "[]"))
-                return {"topic": topic, "prompts": prompts, "row": i}
-        raise HTTPException(status_code=404, detail="No available prompt")
+        data = promptsheet.get_all_records()
+        for idx, row in enumerate(data):
+            if not row.get("used", "").strip():  # ถ้ายังไม่ mark
+                topic = row.get("topic", "")
+                prompts_raw = row.get("prompts", "")
+                prompts = [p.strip() for p in prompts_raw.split("\n") if p.strip()]
+                return {
+                    "topicId": idx + 2,  # แถวใน Google Sheets (เริ่มจาก 2)
+                    "topic": topic,
+                    "prompts": prompts
+                }
+        return {"message": "No available prompts"}
     except Exception as e:
-        logging.exception("Error while prompt/next")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# ====== API: Mark prompt as used ======
-@app.post("/prompt/mark")
+# === API: mark prompt ว่าใช้แล้ว ===
+@app.post("/mark_prompt_used")
 async def mark_prompt_used(req: MarkPromptRequest):
     try:
-        sheet = client.open_by_key(SHEET_ID).worksheet(PROMPT_SHEET_NAME)
-        data = sheet.get_all_records()
-        for i, row in enumerate(data, start=2):
-            if row.get("topic") == req.topic:
-                sheet.update_cell(i, 3, req.status)  # สมมุติ column C เป็น status
-                return {"status": "marked", "row": i}
-        raise HTTPException(status_code=404, detail="Topic not found")
+        row_number = req.topicId
+        if row_number < 2:
+            raise HTTPException(status_code=400, detail="Invalid topicId")
+        promptsheet.update_cell(row_number, 3, "yes")  # สมมติว่า 'used' อยู่คอลัมน์ C (column 3)
+        return {"status": "success", "message": f"Marked row {row_number} as used"}
     except Exception as e:
-        logging.exception("Error while prompt/mark")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 3000)))
+
 
 
 
