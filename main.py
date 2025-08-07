@@ -118,29 +118,22 @@ async def upload_logs(logs: List[ImageLog]):
 @app.get("/get_next_prompt")
 async def get_next_prompt():
     try:
+        # ดึงทั้ง A (rowId), B (topic), C (prompt), J (used)
         result = sheet_service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,
-            range=f"{SHEET_NAME}!A2:C"  # A = rowId, B = topic, C = prompt
+            range=f"{SHEET_NAME}!A2:J"
         ).execute()
 
         rows = result.get('values', [])
         available_prompts = []
 
-        for i, row in enumerate(rows):
-            # ตรวจว่า row มีครบ 3 ช่องหรือไม่
+        for row in rows:
             if len(row) >= 3:
                 row_id = int(row[0])
                 topic = row[1]
                 prompt = row[2]
+                used = row[9] if len(row) >= 10 else ""  # J = index 9
 
-                # ตรวจว่าใช้แล้วหรือยัง (ช่อง J = used = column 10)
-                used_col_index = i + 2  # บวก 2 เพราะเริ่มจาก A2
-                used_check = sheet_service.spreadsheets().values().get(
-                    spreadsheetId=SPREADSHEET_ID,
-                    range=f"{SHEET_NAME}!J{used_col_index}"
-                ).execute()
-
-                used = used_check.get('values', [[""]])[0][0]
                 if used.lower() != "yes":
                     available_prompts.append({
                         "rowId": row_id,
@@ -201,6 +194,7 @@ async def mark_prompt_used(request: MarkPromptRequest):
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 3000)))
+
 
 
 
