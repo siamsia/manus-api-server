@@ -26,8 +26,8 @@ drive_service = build('drive', 'v3', credentials=creds)
 FOLDER_ID = '1fecni5SG7jN97nlWpYePpRaF3XgES8f2'  # <-- Folder ID ของ Google Drive
 
 SHEET_ID = "1bwjLe1Q92SP4OFqrfsqrOnn9eAtTKKCXFIpwVT2oB50"  # ใส่ Spreadsheet ID
-LOG_SHEET = "logs"
-PROMPT_SHEET = "prompts"
+LOG_SHEET_NAME = "logs"
+PROMPT_SHEET_NAME = "prompts"
 
 # ====== Models ======
 class ImageLog(BaseModel):
@@ -161,6 +161,7 @@ async def mark_prompt_used(req: MarkPromptRequest):
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 3000)))
+
 
 
 
