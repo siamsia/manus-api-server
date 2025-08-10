@@ -22,10 +22,10 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # ถ้าจะจำกัดโดเมน ให้ใส่เป็นลิสต์ของโดเมนแทน "*"
-    allow_credentials=True,
-    allow_methods=["*"],          # หรือกำหนดเฉพาะ ["GET","POST","OPTIONS"]
-    allow_headers=["*"],          # หรือกำหนดเฉพาะ headers ที่จะใช้
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ====== SETUP GOOGLE DRIVE API ======
@@ -372,4 +372,5 @@ async def insert_prompts(req: InsertPromptsRequest):
 if __name__ == '__main__':
     from os import environ
     app.run(host='0.0.0.0', port=int(environ.get('PORT', 3000)))
+
 
