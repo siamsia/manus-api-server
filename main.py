@@ -527,4 +527,5 @@ async def clear_prompt_mark(p: ClearPayload):
         
     except Exception as e:
         logging.exception("Error in clear_prompt_mark")
-        raise HTTPException(status_code=500, detail
+        raise HTTPException(status_code=500, detail)
+
