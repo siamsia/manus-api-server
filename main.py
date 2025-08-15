@@ -535,6 +535,10 @@ async def clear_prompt_mark(p: ClearPayload):
             
             # Clear cache
             sheets_cache.invalidate()
+
+    except Exception as e:
+        logging.exception("Error in clear_prompt_mark")
+        raise HTTPException(status_code=500, detail=str(e))
         
 # ====== OPTIMIZED mark_prompt_used ======
 @app.post("/mark_prompt_used")
@@ -704,3 +708,4 @@ async def insert_prompts(req: InsertPromptsRequest):
     except Exception as e:
         logging.exception("Error while insert_prompts")
         raise HTTPException(status_code=500, detail=str(e))
+
