@@ -10,7 +10,11 @@ from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from google.oauth2.service_account import Credentials
+# import gspread  # ไม่ใช้แล้ว
 import logging
+from collections import defaultdict
 import pytz
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -231,6 +235,13 @@ app.add_middleware(
 )
 
 # ====== Models ======
+class ImageLog(BaseModel):
+    id: str
+    filename: str
+    title: str
+    keywords: List[str]
+    prompt: str
+
 class InsertRow(BaseModel):
     topic: str
     prompt: str
@@ -320,8 +331,10 @@ async def download_zip(filename: str):
     else:
         raise HTTPException(status_code=404, detail="File not found")
 
-# ====== LEGACY API (Deprecated) ======
-# @app.post("/upload/log") - ฟังก์ชันนี้เลิกใช้แล้ว
+# ====== REMOVED: Upload Logs API (deprecated) ======
+# @app.post("/upload/log")
+# async def upload_logs(logs: List[ImageLog]):
+#     # This endpoint has been deprecated and removed
 
 # ===== OPTIMIZED PROMPT MANAGEMENT APIs =====
 
@@ -523,10 +536,171 @@ async def clear_prompt_mark(p: ClearPayload):
             # Clear cache
             sheets_cache.invalidate()
         
-        return {"status": "ok", "cleared_cells": len(updates)}
+# ====== OPTIMIZED mark_prompt_used ======
+@app.post("/mark_prompt_used")
+async def mark_prompt_used(request: MarkPromptRequest):
+    try:
+        # Invalidate cache since we're making changes
+        sheets_cache.invalidate()
         
+        await rate_limiter.acquire()
+        
+        metadata = await get_sheet_metadata()
+        idx_map = metadata['idx_map']
+        
+        # Get only rowId column for efficient lookup
+        result = sheet_service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f"{SHEET_NAME}!A2:A{metadata['row_count']}"
+        ).execute()
+
+        row_id_values = result.get('values', [])
+        now_thai = datetime.now(pytz.timezone("Asia/Bangkok")).strftime('%Y-%m-%d %H:%M:%S')
+
+        updates = []
+
+        for i, row in enumerate(row_id_values):
+            if not row:
+                continue
+            try:
+                row_id = int(row[0])
+            except ValueError:
+                continue
+
+            if row_id in request.rowIds:
+                row_idx = i + 2  # เพราะเริ่ม A2
+                
+                # Assume columns: used=J, log_id=K, timestamp=L (adjust as needed)
+                used_col = chr(ord('A') + idx_map.get('used', 9))  # default J
+                log_col = chr(ord('A') + idx_map.get('log_id', 10))  # default K  
+                time_col = chr(ord('A') + idx_map.get('timestamp', 11))  # default L
+                
+                updates.append({
+                    "range": f"{SHEET_NAME}!{used_col}{row_idx}:{time_col}{row_idx}",
+                    "values": [["yes", request.log_id, now_thai]]
+                })
+
+        if updates:
+            await rate_limiter.acquire()
+            body = {"valueInputOption": "RAW", "data": updates}
+            response = sheet_service.spreadsheets().values().batchUpdate(
+                spreadsheetId=SPREADSHEET_ID,
+                body=body
+            ).execute()
+            logging.info("Update response: %s", response)
+            
+            # Invalidate cache after update
+            sheets_cache.invalidate()
+        else:
+            logging.info("No rows matched for update.")
+
+        return {"status": "success", "marked": len(updates)}
+
     except Exception as e:
-        logging.exception("Error in clear_prompt_mark")
+        logging.exception("Error while mark_prompt_used")
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ====== OPTIMIZED insert_prompts ======  
+@app.post("/insert_prompts")
+async def insert_prompts(req: InsertPromptsRequest):
+    try:
+        # Invalidate cache since we're adding data
+        sheets_cache.invalidate()
+        
+        await rate_limiter.acquire()
+        
+        # อ่านทั้งชีตครั้งเดียว
+        read = sheet_service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=SHEET_NAME
+        ).execute()
+        values = read.get("values", [])
+        if not values:
+            raise HTTPException(status_code=500, detail="Sheet has no data")
+
+        headers = values[0]
+        data_rows = values[1:] if len(values) > 1 else []
+
+        # ตรวจหัวข้อคอลัมน์ที่จำเป็น
+        needed = ["rowId", "topic", "prompt", "title",
+                  "keyword1", "keyword2", "keyword3", "keyword4", "keyword5",
+                  "used", "log_id", "timestamp"]
+        idx_map = {h: i for i, h in enumerate(headers)}
+        missing = [c for c in needed if c not in idx_map]
+        if missing:
+            raise HTTPException(status_code=500, detail=f"Missing required columns: {missing}")
+
+        # หา max rowId ปัจจุบัน
+        max_row_id = 0
+        for r in data_rows:
+            try:
+                rid = int(r[idx_map["rowId"]]) if len(r) > idx_map["rowId"] else 0
+                if rid > max_row_id:
+                    max_row_id = rid
+            except ValueError:
+                continue
+
+        # เตรียม values สำหรับ append
+        to_append = []
+        next_id = max_row_id + 1
+        for item in req.payload.rows:
+            kw = [
+                (item.keyword1 or "").strip(),
+                (item.keyword2 or "").strip(),
+                (item.keyword3 or "").strip(),
+                (item.keyword4 or "").strip(),
+                (item.keyword5 or "").strip(),
+            ]
+            row_values = [
+                next_id,            # rowId (A)
+                item.topic,         # topic (B)
+                item.prompt,        # prompt (C)
+                item.title,         # title (D)
+                kw[0],              # keyword1 (E)
+                kw[1],              # keyword2 (F)
+                kw[2],              # keyword3 (G)
+                kw[3],              # keyword4 (H)
+                kw[4],              # keyword5 (I)
+                "",                 # used (J)
+                "",                 # log_id (K)
+                "",                 # timestamp (L)
+            ]
+            to_append.append(row_values)
+            next_id += 1
+
+        if to_append:
+            await rate_limiter.acquire()
+            sheet_service.spreadsheets().values().append(
+                spreadsheetId=SPREADSHEET_ID,
+                range=f"{SHEET_NAME}!A1",
+                valueInputOption="RAW",
+                insertDataOption="INSERT_ROWS",
+                body={"values": to_append}
+            ).execute()
+            
+            # Invalidate cache after insert
+            sheets_cache.invalidate()
+
+        # นับจำนวนแถวที่ยังไม่ถูก mark
+        def count_unmarked(existing_rows):
+            cnt = 0
+            for r in existing_rows:
+                used_val = r[idx_map["used"]] if len(r) > idx_map["used"] else ""
+                if str(used_val).strip().lower() != "yes":
+                    cnt += 1
+            return cnt
+
+        remaining_unmarked = count_unmarked(data_rows) + len(to_append)
+
+        return {
+            "status": "success",
+            "inserted": len(to_append),
+            "remaining_unmarked": remaining_unmarked
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.exception("Error while insert_prompts")
+        raise HTTPException(status_code=500, detail=str(e))
