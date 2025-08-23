@@ -611,7 +611,7 @@ async def mark_prompt_used(request: MarkPromptRequest):
         row_count = metadata["row_count"]
 
         # ตรวจครบถ้วน
-        required = ["row_id", "used", "log_id", "timestamp"]
+        required = ["rowId", "used", "log_id", "timestamp"]
         missing = [k for k in required if k not in idx_map]
         if missing:
             raise HTTPException(
@@ -620,7 +620,7 @@ async def mark_prompt_used(request: MarkPromptRequest):
             )
 
         # คอลัมน์ A1 จาก index (zero-based)
-        row_id_col = col_idx_to_a1(idx_map["row_id"])
+        row_id_col = col_idx_to_a1(idx_map["rowId"])
         used_col   = col_idx_to_a1(idx_map["used"])
         log_col    = col_idx_to_a1(idx_map["log_id"])
         time_col   = col_idx_to_a1(idx_map["timestamp"])
@@ -785,5 +785,6 @@ async def insert_prompts(req: InsertPromptsRequest):
     except Exception as e:
         logging.exception("Error while insert_prompts")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
