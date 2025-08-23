@@ -251,6 +251,11 @@ class InsertRow(BaseModel):
     keyword3: Optional[str] = ""
     keyword4: Optional[str] = ""
     keyword5: Optional[str] = ""
+    keyword6: Optional[str] = ""
+    keyword7: Optional[str] = ""
+    keyword8: Optional[str] = ""
+    keyword9: Optional[str] = ""
+    keyword10: Optional[str] = ""
 
 class InsertPayload(BaseModel):
     schema: str
@@ -785,6 +790,7 @@ async def insert_prompts(req: InsertPromptsRequest):
     except Exception as e:
         logging.exception("Error while insert_prompts")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 
