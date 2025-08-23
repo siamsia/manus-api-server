@@ -336,67 +336,78 @@ async def download_zip(filename: str):
 # async def upload_logs(logs: List[ImageLog]):
 #     # This endpoint has been deprecated and removed
 
+# ====== ROBUST mark_prompt_used (column-safe) ======
+def col_idx_to_a1(col_idx_zero_based: int) -> str:
+    # 0 -> A, 25 -> Z, 26 -> AA ...
+    n = col_idx_zero_based + 1
+    letters = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        letters = chr(65 + r) + letters
+    return letters
+    
 # ===== OPTIMIZED PROMPT MANAGEMENT APIs =====
-
 @app.get("/get_next_prompt")
 async def get_next_prompt():
     try:
         unused_by_topic = await get_unused_rows_by_topic()
-        
         if not unused_by_topic:
             return {"prompts": []}
-        
-        # Get first topic
-        first_topic = next(iter(unused_by_topic.keys()))
-        selected_rows = unused_by_topic[first_topic]
-        
+
         metadata = await get_sheet_metadata()
         headers = metadata['headers']
         idx_map = metadata['idx_map']
-        
-        # Prepare keyword columns
-        keyword_cols = [h for h in headers if h.lower().startswith("keyword")]
-        
+
+        # 1) ให้คัด keyword cols แล้ว "เรียงตามตำแหน่งจริง" จาก idx_map
+        keyword_cols = [h for h in headers if h and h.lower().startswith("keyword")]
+        keyword_cols.sort(key=lambda h: idx_map.get(h, 10**9))  # คอลัมน์ที่หาไม่เจอจะถูกดันไปท้าย
+
         def get_cell(row, col_name):
-            if col_name not in idx_map:
+            ci = idx_map.get(col_name)
+            if ci is None or ci >= len(row):
                 return ""
-            col_idx = idx_map[col_name]
-            if col_idx >= len(row):
-                return ""
-            return str(row[col_idx]).strip()
-        
-        # Build output
+            v = row[ci]
+            return "" if v is None else str(v).strip()
+
+        # 2) เลือก topic แบบนิ่ง: เช่น เรียงตามชื่อ หรือเลือก topic ที่เหลือ unused มากสุด
+        #    (ตัวอย่างนี้: เลือก topic ที่มีจำนวนแถวคงเหลือมากสุด แล้ว fallback เป็นเรียงชื่อ)
+        first_topic = max(
+            sorted(unused_by_topic.keys()),  # fallback: เรียงชื่อ
+            key=lambda t: len(unused_by_topic[t])
+        )
+        selected_rows = unused_by_topic[first_topic]
+
         output = []
         for row_data in selected_rows:
             row = row_data['raw_row']
-            
-            # Title with fallback
-            title = row_data['title']
-            if not title:
-                base = row_data['topic'] or row_data['prompt']
-                title = (base[:70]).strip()
-            
-            # Collect keywords
-            kws = []
-            for kc in keyword_cols:
-                v = get_cell(row, kc)
-                if v:
-                    kws.append(v.strip())
-            
-            # Remove duplicates
+
+            # Title fallback
+            title = row_data.get('title') or (row_data.get('topic') or row_data.get('prompt') or "")[:70].strip()
+
+            # รวบรวม keywords ตามลำดับคอลัมน์จริง
             seen = set()
-            kws = [k for k in kws if k and not (k in seen or seen.add(k))]
-            
-            # Add from prompt if needed
+            kws = []
+            for col in keyword_cols:
+                v = get_cell(row, col)
+                if v:
+                    v = v.strip()
+                    if v and v not in seen:
+                        seen.add(v)
+                        kws.append(v)
+
+            # เติมจาก prompt หากยังไม่ครบ 10 (ปรับกฎกรองคำได้ตามต้องการ)
             if len(kws) < 10:
-                for token in row_data['prompt'].split():
+                for token in (row_data.get('prompt') or "").split():
                     t = token.strip(",.;:()[]{}'\"").lower()
-                    if t and t not in seen:
-                        seen.add(t)
-                        kws.append(t)
-                        if len(kws) >= 10:
-                            break
-            
+                    if not t:
+                        continue
+                    if t in seen:
+                        continue
+                    seen.add(t)
+                    kws.append(t)
+                    if len(kws) >= 10:
+                        break
+
             output.append({
                 "rowId": row_data['rowId'],
                 "topic": row_data['topic'],
@@ -404,63 +415,80 @@ async def get_next_prompt():
                 "title": title,
                 "keywords": kws[:10]
             })
-        
+
         return {"prompts": output}
-        
+
     except Exception as e:
         logging.exception("Error in get_next_prompt")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/mark_prompt_locked")
 async def mark_prompt_locked(p: LockPayload):
     try:
-        # Invalidate cache since we're making changes
+        # เคลียร์ cache เฉพาะ key ที่เกี่ยวข้อง (ถ้ามีระบบแบ่ง key)
         sheets_cache.invalidate("unused_rows")
-        
+
         unused_by_topic = await get_unused_rows_by_topic()
-        
-        # Find topic for the rowId
+
+        # หา topic ที่มี rowId เป้าหมาย
         target_topic = None
         for topic, rows in unused_by_topic.items():
-            if any(row['rowId'] == p.rowId for row in rows):
+            if any(row["rowId"] == p.rowId for row in rows):
                 target_topic = topic
                 break
-        
+
         if not target_topic:
             raise HTTPException(404, "rowId not found in unused rows")
-        
+
         metadata = await get_sheet_metadata()
-        idx_map = metadata['idx_map']
-        
-        # Prepare batch update for all unused rows in the topic
+        idx_map = metadata["idx_map"]
+
+        # ยืนยันคีย์คอลัมน์
+        required = ["used", "log_id"]
+        missing = [k for k in required if k not in idx_map]
+        if missing:
+            raise HTTPException(500, f"Missing columns in header: {', '.join(missing)}")
+
+        used_col = col_idx_to_a1(idx_map["used"])
+        log_col  = col_idx_to_a1(idx_map["log_id"])
+        time_col = col_idx_to_a1(idx_map["timestamp"]) if "timestamp" in idx_map else None
+
+        now_thai = datetime.now(pytz.timezone("Asia/Bangkok")).strftime("%Y-%m-%d %H:%M:%S")
+
         updates = []
         for row_data in unused_by_topic[target_topic]:
-            row_num = row_data['row_idx']
-            used_col = chr(ord('A') + idx_map['used'])
-            log_col = chr(ord('A') + idx_map['log_id'])
-            
-            updates.append({
-                "range": f"{SHEET_NAME}!{used_col}{row_num}",
-                "values": [["LOCKED"]]
-            })
-            updates.append({
-                "range": f"{SHEET_NAME}!{log_col}{row_num}",
-                "values": [[p.log_id]]
-            })
-        
+            row_num = row_data["row_idx"]  # ควรเป็นเลขแถวจริงในชีต (เริ่มนับจาก 1)
+
+            # ข้ามแถวที่ล็อกอยู่แล้ว (กันเขียนซ้ำ)
+            current_used = (row_data.get("used") or "").strip().upper()
+            if current_used == "LOCKED":
+                continue
+
+            if time_col:
+                # เขียน 3 คอลัมน์ในช่วงเดียว
+                updates.append({
+                    "range": f"{SHEET_NAME}!{used_col}{row_num}:{time_col}{row_num}",
+                    "values": [["LOCKED", p.log_id, now_thai]]
+                })
+            else:
+                # เขียน 2 คอลัมน์ (ไม่มี timestamp)
+                updates.append({
+                    "range": f"{SHEET_NAME}!{used_col}{row_num}:{log_col}{row_num}",
+                    "values": [["LOCKED", p.log_id]]
+                })
+
         if updates:
             await rate_limiter.acquire()
             body = {"valueInputOption": "RAW", "data": updates}
             sheet_service.spreadsheets().values().batchUpdate(
-                spreadsheetId=SPREADSHEET_ID, 
+                spreadsheetId=SPREADSHEET_ID,
                 body=body
             ).execute()
-            
-            # Invalidate cache after update
-            sheets_cache.invalidate()
-        
+
+            sheets_cache.invalidate()  # เคลียร์ cache รวม หลังอัปเดต
         return {"status": "ok", "locked_cells": len(updates)}
-        
+
     except Exception as e:
         logging.exception("Error in mark_prompt_locked")
         raise HTTPException(status_code=500, detail=str(e))
@@ -544,25 +572,38 @@ async def clear_prompt_mark(p: ClearPayload):
 @app.post("/mark_prompt_used")
 async def mark_prompt_used(request: MarkPromptRequest):
     try:
-        # Invalidate cache since we're making changes
         sheets_cache.invalidate()
-        
         await rate_limiter.acquire()
-        
+
         metadata = await get_sheet_metadata()
-        idx_map = metadata['idx_map']
-        
-        # Get only rowId column for efficient lookup
+        idx_map = metadata["idx_map"]  # ควรมี 'row_id', 'used', 'log_id', 'timestamp'
+        row_count = metadata["row_count"]
+
+        # ตรวจครบถ้วน
+        required = ["row_id", "used", "log_id", "timestamp"]
+        missing = [k for k in required if k not in idx_map]
+        if missing:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Missing columns in header: {', '.join(missing)}"
+            )
+
+        # คอลัมน์ A1 จาก index (zero-based)
+        row_id_col = col_idx_to_a1(idx_map["row_id"])
+        used_col   = col_idx_to_a1(idx_map["used"])
+        log_col    = col_idx_to_a1(idx_map["log_id"])
+        time_col   = col_idx_to_a1(idx_map["timestamp"])
+
+        # ดึงเฉพาะคอลัมน์ row_id แบบไดนามิก (ไม่ฮาร์ดโค้ด A)
         result = sheet_service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,
-            range=f"{SHEET_NAME}!A2:A{metadata['row_count']}"
+            range=f"{SHEET_NAME}!{row_id_col}2:{row_id_col}{row_count}"
         ).execute()
 
-        row_id_values = result.get('values', [])
-        now_thai = datetime.now(pytz.timezone("Asia/Bangkok")).strftime('%Y-%m-%d %H:%M:%S')
+        row_id_values = result.get("values", [])
+        now_thai = datetime.now(pytz.timezone("Asia/Bangkok")).strftime("%Y-%m-%d %H:%M:%S")
 
         updates = []
-
         for i, row in enumerate(row_id_values):
             if not row:
                 continue
@@ -572,13 +613,7 @@ async def mark_prompt_used(request: MarkPromptRequest):
                 continue
 
             if row_id in request.rowIds:
-                row_idx = i + 2  # เพราะเริ่ม A2
-                
-                # Assume columns: used=J, log_id=K, timestamp=L (adjust as needed)
-                used_col = chr(ord('A') + idx_map.get('used', 9))  # default J
-                log_col = chr(ord('A') + idx_map.get('log_id', 10))  # default K  
-                time_col = chr(ord('A') + idx_map.get('timestamp', 11))  # default L
-                
+                row_idx = i + 2  # เพราะเริ่มจากแถว 2
                 updates.append({
                     "range": f"{SHEET_NAME}!{used_col}{row_idx}:{time_col}{row_idx}",
                     "values": [["yes", request.log_id, now_thai]]
@@ -587,13 +622,11 @@ async def mark_prompt_used(request: MarkPromptRequest):
         if updates:
             await rate_limiter.acquire()
             body = {"valueInputOption": "RAW", "data": updates}
-            response = sheet_service.spreadsheets().values().batchUpdate(
+            resp = sheet_service.spreadsheets().values().batchUpdate(
                 spreadsheetId=SPREADSHEET_ID,
                 body=body
             ).execute()
-            logging.info("Update response: %s", response)
-            
-            # Invalidate cache after update
+            logging.info("Update response: %s", resp)
             sheets_cache.invalidate()
         else:
             logging.info("No rows matched for update.")
@@ -604,16 +637,14 @@ async def mark_prompt_used(request: MarkPromptRequest):
         logging.exception("Error while mark_prompt_used")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ====== OPTIMIZED insert_prompts ======  
 @app.post("/insert_prompts")
 async def insert_prompts(req: InsertPromptsRequest):
     try:
-        # Invalidate cache since we're adding data
+        # เคลียร์ cache เพราะจะมีการเพิ่มข้อมูล
         sheets_cache.invalidate()
-        
         await rate_limiter.acquire()
-        
+
         # อ่านทั้งชีตครั้งเดียว
         read = sheet_service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID,
@@ -625,52 +656,69 @@ async def insert_prompts(req: InsertPromptsRequest):
 
         headers = values[0]
         data_rows = values[1:] if len(values) > 1 else []
-
-        # ตรวจหัวข้อคอลัมน์ที่จำเป็น
-        needed = ["rowId", "topic", "prompt", "title",
-                  "keyword1", "keyword2", "keyword3", "keyword4", "keyword5",
-                  "used", "log_id", "timestamp"]
+        # ทำ idx_map จากหัวตารางจริง
         idx_map = {h: i for i, h in enumerate(headers)}
-        missing = [c for c in needed if c not in idx_map]
-        if missing:
-            raise HTTPException(status_code=500, detail=f"Missing required columns: {missing}")
+
+        # ตรวจคอลัมน์จำเป็นขั้นต่ำ (ไม่บังคับ keyword6–10)
+        required_min = ["rowId", "topic", "prompt", "title", "used", "log_id", "timestamp"]
+        missing_min = [c for c in required_min if c not in idx_map]
+        if missing_min:
+            raise HTTPException(status_code=500, detail=f"Missing required columns: {missing_min}")
+
+        # หา keyword columns จากหัวจริงทั้งหมด แล้วเรียงตามตำแหน่ง
+        keyword_cols = [h for h in headers if isinstance(h, str) and h.strip().lower().startswith("keyword")]
+        keyword_cols.sort(key=lambda h: idx_map[h])
 
         # หา max rowId ปัจจุบัน
         max_row_id = 0
+        rowid_idx = idx_map["rowId"]
         for r in data_rows:
             try:
-                rid = int(r[idx_map["rowId"]]) if len(r) > idx_map["rowId"] else 0
+                rid = int(r[rowid_idx]) if len(r) > rowid_idx else 0
                 if rid > max_row_id:
                     max_row_id = rid
             except ValueError:
                 continue
 
-        # เตรียม values สำหรับ append
+        # helper: ดึงค่าคีย์เวิร์ด 1..10 จาก payload (ไม่ครบให้ค่าว่าง)
+        def extract_keywords(item):
+            kws = []
+            for i in range(1, 11):  # รองรับ keyword1..keyword10
+                val = getattr(item, f"keyword{i}", None)
+                kws.append((val or "").strip())
+            return kws
+
+        # เตรียม values สำหรับ append (ความยาวแถว = จำนวน headers จริง)
         to_append = []
         next_id = max_row_id + 1
+        used_idx = idx_map["used"]
+        log_idx = idx_map["log_id"]
+        ts_idx = idx_map["timestamp"]
+
         for item in req.payload.rows:
-            kw = [
-                (item.keyword1 or "").strip(),
-                (item.keyword2 or "").strip(),
-                (item.keyword3 or "").strip(),
-                (item.keyword4 or "").strip(),
-                (item.keyword5 or "").strip(),
-            ]
-            row_values = [
-                next_id,            # rowId (A)
-                item.topic,         # topic (B)
-                item.prompt,        # prompt (C)
-                item.title,         # title (D)
-                kw[0],              # keyword1 (E)
-                kw[1],              # keyword2 (F)
-                kw[2],              # keyword3 (G)
-                kw[3],              # keyword4 (H)
-                kw[4],              # keyword5 (I)
-                "",                 # used (J)
-                "",                 # log_id (K)
-                "",                 # timestamp (L)
-            ]
-            to_append.append(row_values)
+            row_vals = [""] * len(headers)
+
+            # base fields
+            row_vals[rowid_idx] = next_id
+            if "topic" in idx_map:   row_vals[idx_map["topic"]] = item.topic
+            if "prompt" in idx_map:  row_vals[idx_map["prompt"]] = item.prompt
+            if "title" in idx_map:   row_vals[idx_map["title"]] = item.title
+
+            # map keywords ลงตามคอลัมน์ keyword ที่มีจริงในชีต
+            payload_kws = extract_keywords(item)    # ยาว 10 เสมอ (อาจเป็น "" ถ้าไม่มี)
+            for i, col_name in enumerate(keyword_cols):
+                # i อาจมากกว่า 9 ถ้าชีตมี keyword เกิน 10; ตัดที่ payload ที่มี
+                if i >= len(payload_kws):
+                    break
+                col_idx = idx_map[col_name]
+                row_vals[col_idx] = payload_kws[i]
+
+            # used/log_id/timestamp เว้นว่าง (ให้ flow อื่นไปกรอก)
+            row_vals[used_idx] = ""
+            row_vals[log_idx] = ""
+            row_vals[ts_idx] = ""
+
+            to_append.append(row_vals)
             next_id += 1
 
         if to_append:
@@ -682,15 +730,13 @@ async def insert_prompts(req: InsertPromptsRequest):
                 insertDataOption="INSERT_ROWS",
                 body={"values": to_append}
             ).execute()
-            
-            # Invalidate cache after insert
             sheets_cache.invalidate()
 
-        # นับจำนวนแถวที่ยังไม่ถูก mark
+        # นับแถวที่ยังไม่ถูก mark (ยังไม่ใช่ "yes")
         def count_unmarked(existing_rows):
             cnt = 0
             for r in existing_rows:
-                used_val = r[idx_map["used"]] if len(r) > idx_map["used"] else ""
+                used_val = r[used_idx] if len(r) > used_idx else ""
                 if str(used_val).strip().lower() != "yes":
                     cnt += 1
             return cnt
