@@ -350,68 +350,98 @@ def col_idx_to_a1(col_idx_zero_based: int) -> str:
 @app.get("/get_next_prompt")
 async def get_next_prompt():
     try:
-        unused_by_topic = await get_unused_rows_by_topic()
-        if not unused_by_topic:
+        # อ่าน metadata + ทั้งชีต (เพื่อคงลำดับแถวจริง)
+        metadata = await get_sheet_metadata()
+        headers = metadata["headers"]
+        idx_map  = metadata["idx_map"]
+
+        # ตรวจคอลัมน์ขั้นต่ำที่ต้องมี
+        required = ["rowId", "topic", "prompt", "title", "used"]
+        missing  = [c for c in required if c not in idx_map]
+        if missing:
+            raise HTTPException(status_code=500, detail=f"Missing required columns: {missing}")
+
+        await rate_limiter.acquire()
+        read = sheet_service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=SHEET_NAME
+        ).execute()
+        values = read.get("values", [])
+        if not values:
             return {"prompts": []}
 
-        metadata = await get_sheet_metadata()
-        headers = metadata['headers']
-        idx_map = metadata['idx_map']
+        # แถวข้อมูลจริงเริ่มหลัง header
+        data_rows = values[1:] if len(values) > 1 else []
 
-        # 1) ให้คัด keyword cols แล้ว "เรียงตามตำแหน่งจริง" จาก idx_map
-        keyword_cols = [h for h in headers if h and h.lower().startswith("keyword")]
-        keyword_cols.sort(key=lambda h: idx_map.get(h, 10**9))  # คอลัมน์ที่หาไม่เจอจะถูกดันไปท้าย
-
-        def get_cell(row, col_name):
-            ci = idx_map.get(col_name)
-            if ci is None or ci >= len(row):
+        # เตรียมตัวช่วยอ่านค่าเซลล์ตามชื่อคอลัมน์
+        def cell(row, col):
+            i = idx_map.get(col)
+            if i is None or i >= len(row):
                 return ""
-            v = row[ci]
+            v = row[i]
             return "" if v is None else str(v).strip()
 
-        # 2) เลือก topic แบบนิ่ง: เช่น เรียงตามชื่อ หรือเลือก topic ที่เหลือ unused มากสุด
-        #    (ตัวอย่างนี้: เลือก topic ที่มีจำนวนแถวคงเหลือมากสุด แล้ว fallback เป็นเรียงชื่อ)
-        first_topic = max(
-            sorted(unused_by_topic.keys()),  # fallback: เรียงชื่อ
-            key=lambda t: len(unused_by_topic[t])
-        )
-        selected_rows = unused_by_topic[first_topic]
+        # หา index ของแถวแรกที่ used ว่างจริง
+        first_idx = None
+        for i, row in enumerate(data_rows):
+            if cell(row, "used") == "":
+                first_idx = i
+                break
 
+        if first_idx is None:
+            return {"prompts": []}
+
+        # อ่าน topic ของแถวแรกนั้น
+        target_topic = cell(data_rows[first_idx], "topic")
+
+        # เก็บบล็อกแถวติดกันที่ topic เหมือนกัน และ used ว่าง
+        block_rows = []
+        i = first_idx
+        while i < len(data_rows):
+            row = data_rows[i]
+            if cell(row, "used") != "":
+                break
+            if cell(row, "topic") != target_topic:
+                break
+            block_rows.append((i, row))  # เก็บ (indexภายในdata_rows, raw_row)
+            i += 1
+
+        if not block_rows:
+            return {"prompts": []}
+
+        # เตรียมรายชื่อคอลัมน์ keyword* ตามลำดับจริงในชีต
+        keyword_cols = [h for h in headers if isinstance(h, str) and h.strip().lower().startswith("keyword")]
+        keyword_cols.sort(key=lambda h: idx_map.get(h, 10**9))
+
+        # ประกอบผลลัพธ์
         output = []
-        for row_data in selected_rows:
-            row = row_data['raw_row']
+        for i, row in block_rows:
+            # ดึงค่าหลัก
+            row_id   = cell(row, "rowId")
+            topic    = cell(row, "topic")
+            prompt   = cell(row, "prompt")
+            title    = cell(row, "title") or (topic or prompt)[:70].strip()
 
-            # Title fallback
-            title = row_data.get('title') or (row_data.get('topic') or row_data.get('prompt') or "")[:70].strip()
+            # keywords จากคอลัมน์จริง (ลำดับตามคอลัมน์)
+            seen, kws = set(), []
+            for kc in keyword_cols:
+                v = cell(row, kc)
+                if v and v not in seen:
+                    seen.add(v); kws.append(v)
 
-            # รวบรวม keywords ตามลำดับคอลัมน์จริง
-            seen = set()
-            kws = []
-            for col in keyword_cols:
-                v = get_cell(row, col)
-                if v:
-                    v = v.strip()
-                    if v and v not in seen:
-                        seen.add(v)
-                        kws.append(v)
-
-            # เติมจาก prompt หากยังไม่ครบ 10 (ปรับกฎกรองคำได้ตามต้องการ)
-            if len(kws) < 10:
-                for token in (row_data.get('prompt') or "").split():
+            # เติมจาก prompt ให้ครบ 10 ถ้ายังไม่ถึง
+            if len(kws) < 10 and prompt:
+                for token in prompt.split():
                     t = token.strip(",.;:()[]{}'\"").lower()
-                    if not t:
-                        continue
-                    if t in seen:
-                        continue
-                    seen.add(t)
-                    kws.append(t)
-                    if len(kws) >= 10:
-                        break
+                    if t and t not in seen:
+                        seen.add(t); kws.append(t)
+                        if len(kws) >= 10:
+                            break
 
             output.append({
-                "rowId": row_data['rowId'],
-                "topic": row_data['topic'],
-                "prompt": row_data['prompt'],
+                "rowId": int(row_id) if str(row_id).isdigit() else row_id,
+                "topic": topic,
+                "prompt": prompt,
                 "title": title,
                 "keywords": kws[:10]
             })
@@ -419,8 +449,9 @@ async def get_next_prompt():
         return {"prompts": output}
 
     except Exception as e:
-        logging.exception("Error in get_next_prompt")
+        logging.exception("Error in get_next_prompt (contiguous block)")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.post("/mark_prompt_locked")
@@ -754,4 +785,5 @@ async def insert_prompts(req: InsertPromptsRequest):
     except Exception as e:
         logging.exception("Error while insert_prompts")
         raise HTTPException(status_code=500, detail=str(e))
+
 
